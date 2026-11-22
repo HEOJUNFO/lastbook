@@ -31,6 +31,29 @@ Two kinds of table carry the things a person can tap:
 - `resource(id, source_id, kind, name, lat, lon, detail, source, origin)` with its `spatial` index: a record with a kind,
   a line of detail and the name of its source.
 
+## Opening a locally built map on Windows
+
+The setup picker lists published maps. To preview a map you built, keep it in its own writable folder with
+`map-set.json` at the top and the map files under `derived/geo/`. The desktop app also requires a
+`library-data/catalog.json` in that folder. For a new map-only folder, the commands below create an empty
+catalog without a byte order mark. Keep any existing catalog intact.
+
+Open PowerShell and replace `C:\path\to\LastbookData` with your map folder. This example uses the default
+location of the installed Windows app.
+
+```powershell
+$map = "C:\path\to\LastbookData"
+$library = Join-Path $map "library-data"
+$catalog = Join-Path $library "catalog.json"
+if (-not (Test-Path -LiteralPath $catalog)) {
+    New-Item -ItemType Directory -Path $library -Force | Out-Null
+    Set-Content -LiteralPath $catalog -Value '[]' -Encoding ASCII
+}
+& "$env:LOCALAPPDATA\Programs\Lastbook\Lastbook.exe" --data $map
+```
+
+Select **Map** in Lastbook and look up a place within the map's coverage to check that the detail loads.
+
 ## How a place gets onto the map
 
 1. A row with a class (`poi.cls`) or a kind (`resource.kind`) is in one of the files above.
@@ -115,12 +138,42 @@ issue before any code.
 [REGIONS-ES.md](REGIONS-ES.md) does the same for Spain's 17 autonomous communities and its two autonomous cities.
 [REGIONS-FR.md](REGIONS-FR.md) does the same for France's 18 regions, with figures from a trial build.
 [REGIONS-CL.md](REGIONS-CL.md) does the same for Chile's 16 regions.
+[REGIONS-CL-DPA2023.md](REGIONS-CL-DPA2023.md) adds a DPA 2023 companion study and paired Spanish text for Chile.
 [REGIONS-AE.md](REGIONS-AE.md) does the same for the United Arab Emirates, proposed as one map for all seven emirates.
 [REGIONS-IN.md](REGIONS-IN.md) does the same for India's 28 states and 8 union territories.
 [REGIONS-PK.md](REGIONS-PK.md) does the same for Pakistan's provinces and territories, with Islamabad and Rawalpindi
 as one map.
 [REGIONS-MB.md](REGIONS-MB.md) does the same for the Canadian province of Manitoba.
 [REGIONS-DK.md](REGIONS-DK.md) does the same for Denmark's 5 regions.
+[REGIONS-AT.md](REGIONS-AT.md) does the same for Austria's nine states.
+
+[REGIONS-MX.md](REGIONS-MX.md) does the same for Mexico's 32 states (entidades federativas).
+
+[REGIONS-BR.md](REGIONS-BR.md) does the same for Brazil's 26 states and the Federal District (Distrito Federal), 27 in all.
+
+[REGIONS-BO.md](REGIONS-BO.md) does the same for Bolivia as one country-wide region, with its nine departments as an
+alternative.
+
+### To do: maps for every place on Earth
+
+The goal is a detailed map for any place a person lives.
+
+- [ ] **Region ids.** The manifest already accepts map ids such as `DE-BE` and `CA-ON`. Address-index ids in
+  `engine/setup/manifest.py` and the address-index filenames carried over by `engine/setup/install.py` still use
+  two capital letters. The map builders in `packaging/state_maps.py` and `packaging/build_packs.py` use US regions.
+  Most proposals above use ISO 3166-2 ids to avoid reusing US state codes such as `DE` and `CA`.
+- [ ] **Sources.** Pick an open replacement for each US dataset, region by region, with its licence. The region
+  proposals above do this.
+- [ ] **No Southern California box.** `server.py` assumes `map.sqlite` covers Southern California (`_poi_sources`,
+  `socal_classes`).
+- [ ] **Setup.** First run asks for a US state map (#267). Installing several maps or a locally built map through
+  Setup is #53. A hand-built library already opens with [`--data`](#opening-a-locally-built-map-on-windows).
+- [ ] **Address search.** It knows US state names and US street words. Other countries write the number after the
+  street, fold accents, or have no postcode.
+- [ ] **Units.** The map shows distances in miles above 1.6 km and contour lines in feet (`web/map.js`).
+- [ ] **Emergency number** for the person's country (#261).
+
+The design discussion is in #23, #25, #31 and #95.
 
 ## Checking a map change
 
