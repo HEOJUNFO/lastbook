@@ -64,11 +64,16 @@ Packs may be split into several files later; setup downloads all `files` of a pa
 
 `ALLOWED_HOSTS`: `downloads.lastbook.org`, the bucket's current `*.r2.dev` host (until the domain is live), `huggingface.co`,
 and the hosts Hugging Face redirects model downloads to (`cas-bridge.xethub.hf.co`, `*.hf.co`; on 2026-11-12 the model resolved to `us.aws.cdn.hf.co`). R2 ignores If-Range, so the downloader compares the ETag itself.
+A new ETag on a resume does not by itself start the file over, because the same file uploaded again gets one: three 1 MiB
+stretches of what is on disk (start, middle, end) are fetched again and compared. If they are the server's, the download
+carries on under the new ETag, and the SHA-256 at the end still judges the whole file; if a byte differs, it starts over.
+If a stretch cannot be fetched, that is a broken or busy connection like any other, and the partial file is kept (#208).
 A file of `PARALLEL_MIN` (512 MiB) or more is fetched over `CONNECTIONS` (8) connections at once, each with a closed Range
 for one `PIECE` (16 MiB). One connection to `downloads.lastbook.org` gave about 2 MB/s and 8 about 13 MB/s (2026-11-17).
 Pieces are handed out in order, at most `AHEAD` (16) past the first unfinished one. The run of finished pieces from byte 0 is
 hashed as it completes, read back from the disk, so the SHA-256 is ready when the last piece lands. Every 206 must carry the
-first one's ETag and total size: another ETag starts the file over (twice: it goes on over one connection), another size
+first one's ETag and total size: another ETag is checked as above against the hashed run (the same bytes: the run is kept and
+the pieces carry on; other bytes: the file starts over; a second new ETag: it goes on over one connection), another size
 fails as `checksum`, and a 200 to a Range goes on over one connection from the hashed run. The exact list is a constant in
 `engine/setup/download.py`, and the package scan checks that it is the only module that opens connections.
 
@@ -96,9 +101,12 @@ fails as `checksum`, and a 200 to a Range goes on over one connection from the h
   Downloads, Documents and Desktop are not searched. A file is used only after its size and SHA-256 match the manifest.
 - Chat's local AI looks for the model only in the open library's `models/` and the library folder itself, and in
   `LASTBOOK_MODEL_DIR` when that is set (`llm_local.py` `places`). *Look again* searches those again.
-- If the local AI download stops with a network error before gaining any bytes, the Stopped card also offers **Choose AI
-  model file**. Choosing the published model file resumes that same job, keeping any finished library or map steps. Its
-  size and SHA-256 are checked as usual; a file that does not match is left alone and is not used.
+- If the local AI download stops as `unreachable` (also after an earlier try got part of it), or with a network error before
+  gaining any bytes, the Stopped card also
+  offers **Choose AI model file**. Choosing the published model file resumes that same job, keeping any finished library or
+  map steps. Its size and SHA-256 are checked as usual; a file that does not match is left alone and is not used. An
+  `unreachable` stop also shows the file's name, exact size, address and SHA-256, so it can be fetched on another network
+  or computer (#254).
 
 ## Engine interface: `/api/setup/*`
 
@@ -138,7 +146,7 @@ item that stopped mid-run has `paused_from` (`downloading`, `verifying`, `unpack
 `bytes_done`/`bytes_total` describe that step: unpacked bytes of the installed size for `unpacking`, the whole file for a found item. States in order: `waiting`, `downloading`, `paused`, `verifying`, `unpacking`,
 `activating`, `done`, or `failed` (with `error`: a plain sentence and a `code`: `no_space`, `network`, `server` (the download
 server kept answering 5xx or 429 for 40 minutes, so the internet itself was up), `checksum`, `unpack`,
-`activate`, `cancelled`, and `found_mismatch`: a file already on this computer (`use`) did not match its published SHA-256; the error carries `file`, the file is left untouched and no longer offered, and `retry` downloads it instead). The job lives in the app's own settings folder (`<settings>/setup/job.json`, with a staged switch in `<settings>/setup/pending.json`; never in `LastbookData.setup`, whose contents are not obeyed: audit E3), so a restart picks it up as `paused` and resumes
+`unreachable` (the connection kept breaking on a host that never answered this download: a network that blocks or resets it, or no internet; the error carries `host`, and the file's published `name`, `size`, `url` and `sha256`), `activate`, `check` (a Check now, `start {check: true}`, could not read a file; it downloads and changes nothing), `cancelled`, and `found_mismatch`: a file already on this computer (`use`) did not match its published SHA-256; the error carries `file`, the file is left untouched and no longer offered, and `retry` downloads it instead). The job lives in the app's own settings folder (`<settings>/setup/job.json`, with a staged switch in `<settings>/setup/pending.json`; never in `LastbookData.setup`, whose contents are not obeyed: audit E3), so a restart picks it up as `paused` and resumes
 with HTTP Range from the bytes already on disk. While downloading, a broken connection is retried six times over about 90 seconds.
 A server that answers 5xx or 429 is waited on longer (5 s rising to 5 minutes, or its `Retry-After` up to 10 minutes, and
 40 minutes in all without progress). While such a wait is ahead, the item has `retry_in_s`, the seconds until the next try.
