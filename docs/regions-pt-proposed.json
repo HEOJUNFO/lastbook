@@ -251,16 +251,16 @@
       "admin_level": "autonomous region",
       "nuts": "PT30",
       "bbox": {
-        "west": -17.26599957299993,
-        "south": 30.02567281000006,
-        "east": -15.85542014899994,
-        "north": 33.103993573000025,
+        "west": -17.265938,
+        "south": 30.028778,
+        "east": -15.853671,
+        "north": 33.128161,
         "margin_west": -17.42,
         "margin_south": 29.87,
         "margin_east": -15.7,
-        "margin_north": 33.26
+        "margin_north": 33.28
       },
-      "bbox_source": "GISCO NUTS 2024 1:3M polygon bounds"
+      "bbox_source": "CAOP 2025 (RAM) NUTS II polygon bounds, converted vertex by vertex from EPSG:5016 (see MAP-PT-30.md)"
     }
   ]
 }

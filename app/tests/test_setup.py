@@ -3047,6 +3047,127 @@ def make_map(path, state='CA', extra=None):
     return files
 
 
+class WithFlags:
+    """A stat result with st_flags, for a system whose own results have none. Everything else is the real result's."""
+
+    def __init__(self, st):
+        self._st, self.st_flags = st, 0
+
+    def __getattr__(self, name):
+        return getattr(self._st, name)
+
+
+class CloudOnly(Base):
+    """Files of the library whose contents are only in iCloud (#362): found from metadata alone, never opened."""
+
+    def setUp(self):
+        super().setUp()
+        # These tests tell the code it is on a Mac. Only macOS and the BSDs put st_flags on a stat result, so on Linux and
+        # Windows os.lstat is given the flags of an ordinary file here. On a Mac nothing is patched.
+        if not hasattr(os.lstat(self.tmp), 'st_flags'):
+            real = os.lstat
+            patch = mock.patch.object(hardware.os, 'lstat', lambda path, *a, **kw: WithFlags(real(path, *a, **kw)))
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def library(self):
+        lib = self.tmp / 'LastbookData'
+        for rel in ('library-data/catalog.json', 'videos/a.mp4', 'videos/b.mp4', 'zim/old/c.zim'):
+            (lib / rel).parent.mkdir(parents=True, exist_ok=True)
+            (lib / rel).write_bytes(b'x' * 10)
+        return lib
+
+    def placeholders(self, lib, *rels):
+        """os.lstat as macOS reports an evicted iCloud item: the SF_DATALESS flag (0x40000000), contents not on this computer."""
+        real = os.lstat
+        cloud = {str(lib / r) for r in rels}
+
+        def lstat(path, *a, **kw):
+            st = real(path, *a, **kw)
+            if str(path) not in cloud:
+                return st
+            return mock.Mock(st_flags=st.st_flags | 0x40000000, st_size=st.st_size, st_mode=st.st_mode)
+        return mock.patch.object(hardware.os, 'lstat', lstat)
+
+    def test_placeholder_found_ordinary_file_not(self):
+        lib = self.library()
+        with mock.patch.object(hardware.sys, 'platform', 'darwin'), self.placeholders(lib, 'videos/b.mp4'):
+            r = hardware.cloud_only(lib)
+        self.assertEqual(r, {'files': 1, 'folders': 0, 'bytes': 10, 'examples': ['videos/b.mp4']})
+
+    def test_nothing_in_the_cloud(self):
+        lib = self.library()
+        with mock.patch.object(hardware.sys, 'platform', 'darwin'):
+            self.assertEqual(hardware.cloud_only(lib), {'files': 0, 'folders': 0, 'bytes': 0, 'examples': []})
+
+    def test_folder_in_the_cloud_is_not_listed(self):
+        # Listing an evicted folder asks iCloud for its contents, which can hang offline: count it, do not open it.
+        lib = self.library()
+        with mock.patch.object(hardware.sys, 'platform', 'darwin'), self.placeholders(lib, 'zim/old', 'zim/old/c.zim'):
+            r = hardware.cloud_only(lib)
+        self.assertEqual((r['files'], r['folders'], r['examples']), (0, 1, ['zim/old/']))
+
+    def test_files_are_never_opened(self):
+        lib = self.library()
+        with mock.patch.object(hardware.sys, 'platform', 'darwin'), self.placeholders(lib, 'videos/a.mp4'), \
+                mock.patch('builtins.open', side_effect=AssertionError('opened a file')):
+            self.assertEqual(hardware.cloud_only(lib)['files'], 1)
+
+    def test_only_on_a_mac(self):
+        with mock.patch.object(hardware.sys, 'platform', 'win32'):
+            self.assertIsNone(hardware.cloud_only(self.library()))
+
+    def test_setup_reports_it_for_the_open_library(self):
+        lib = self.library()
+        s = self.setup('manage', current=lib)
+        with mock.patch.object(hardware.sys, 'platform', 'darwin'), self.placeholders(lib, 'videos/a.mp4', 'videos/b.mp4'):
+            s.current_info()                       # counting starts in the background, so the page is not held up
+            s.cloud_thread.join(10)
+            r = s.current_info()['cloud_only']
+        self.assertEqual((r['files'], r['examples']), (2, ['videos/a.mp4', 'videos/b.mp4']))
+
+    def info_on(self, system):
+        """current_info as the page gets it on this system, and whether a count was started."""
+        s = self.setup('manage', current=self.library())
+        with mock.patch.object(hardware.sys, 'platform', system):
+            info = s.current_info()
+        return info, s.cloud_thread
+
+    def test_other_systems_are_not_counting(self):
+        # #370 review: None alone also meant "still counting", so Windows and Linux were asked again up to CLOUD_POLLS times.
+        for system in ('win32', 'linux'):
+            with self.subTest(system=system):
+                info, thread = self.info_on(system)
+                self.assertEqual((info['cloud_only'], info['cloud_counting'], thread), (None, False, None))
+        info, thread = self.info_on('darwin')
+        self.assertEqual((info['cloud_only'], info['cloud_counting']), (None, True))
+        thread.join(10)
+
+    @unittest.skipUnless(shutil.which('node'), 'needs Node')
+    def test_page_asks_again_only_while_counting_with_one_timer(self):
+        """setup.js's own cloudPoll, fed the engine's answer and drawn five times (every redraw of Manage calls it): no timer on
+        Windows or Linux, one timer on a Mac while the count runs, and a new one only after that one has run."""
+        script = r"""
+const src = require('fs').readFileSync(process.argv[1], 'utf8'), infos = JSON.parse(process.argv[2]);
+const section = (a, b) => src.slice(src.indexOf(a), src.indexOf(b, src.indexOf(a)));
+const out = {};
+for (const [system, c] of Object.entries(infos)) {
+  const timers = [];
+  const setTimeout = f => { timers.push(f); return timers.length };
+  let view = 'manage', S = {}, cloudPolls = 0, cloudT = null, cloudFor = '';
+  const CLOUD_POLL_MS = 3000, CLOUD_POLLS = 20, call = async () => S, cur = () => c, manageView = () => cloudPoll(c);
+  eval(section('  function cloudPoll(', '  function manageView('));
+  for (let i = 0; i < 5; i++) cloudPoll(c);
+  out[system] = timers.length;
+}
+console.log(JSON.stringify(out));
+"""
+        infos = {system: self.info_on(system)[0] for system in ('win32', 'linux', 'darwin')}
+        r = subprocess.run([shutil.which('node'), '-e', script, str(ROOT / 'web' / 'setup.js'), json.dumps(infos)],
+                           check=True, capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(json.loads(r.stdout), {'win32': 0, 'linux': 0, 'darwin': 1})
+
+
 class Maps(Base):
     def map_manifest(self, extra=None):
         files = make_map(self.tmp / 'Lastbook-Map-CA.zip', extra=extra)
@@ -3830,6 +3951,186 @@ def child(cfg):
     print(s.start('small', False), flush=True)
     time.sleep(600)
 
+
+
+# ------------------------------------------------------------------------------------- a model server on this computer --
+class ModelServerFake(http.server.BaseHTTPRequestHandler):
+    """An OpenAI-style server on 127.0.0.1: /v1/models answers with ANSWER (status, body). Counts what it is asked."""
+    ANSWER = (200, b'{"object":"list","data":[{"id":"small-9b"},{"id":"other"}]}')
+    asked = []
+
+    def do_GET(self):
+        ModelServerFake.asked.append(self.path)
+        status, body = ModelServerFake.ANSWER
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+class ModelServer(Base):
+    """#78: a model server the person chooses in Setup. Asked only when the person asks, and only on this computer."""
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.fake = socketserver.ThreadingTCPServer(('127.0.0.1', 0), ModelServerFake)
+        cls.fake.daemon_threads = True
+        threading.Thread(target=cls.fake.serve_forever, daemon=True).start()
+        cls.where = f'127.0.0.1:{cls.fake.server_address[1]}'
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.fake.shutdown()
+        cls.fake.server_close()
+        super().tearDownClass()
+
+    def setUp(self):
+        super().setUp()
+        ModelServerFake.ANSWER = (200, b'{"object":"list","data":[{"id":"small-9b"},{"id":"other"}]}')
+        ModelServerFake.asked = []
+        self.switched = []
+
+    def chooser(self, mode='manage'):
+        return self.setup(mode, current=self.tmp if mode == 'manage' else None, on_model_server=lambda b, m: self.switched.append((b, m)))
+
+    def test_fresh_setup_asks_no_model_server(self):
+        from engine import model_server
+        with mock.patch.object(model_server, 'model_open', side_effect=AssertionError('a model server was asked')):
+            for mode in ('first-run', 'manage'):
+                st = self.chooser(mode).state()
+                self.assertIsNone(st['model_server'])
+        self.assertEqual(ModelServerFake.asked, [])
+        self.assertFalse((self.settings / 'setup.json').exists() and 'model_server' in json.loads((self.settings / 'setup.json').read_text(encoding='utf-8')))
+
+    def test_lists_the_models_of_the_chosen_server(self):
+        s = self.chooser()
+        for typed in (self.where, 'localhost:' + self.where.split(':')[1] + '/v1', f'http://{self.where}/', f' http://{self.where}/v1/ '):
+            got = s.server_models(typed)
+            self.assertEqual(got, {'base': 'http://' + self.where, 'address': self.where, 'models': ['small-9b', 'other']}, typed)
+        self.assertEqual(set(ModelServerFake.asked), {'/v1/models'})
+
+    def test_only_this_computer(self):
+        from engine import model_server
+        s = self.chooser()
+        with mock.patch.object(model_server, 'model_open', side_effect=AssertionError('asked')):
+            for typed in ('10.0.0.5:8080', 'example.org:80', 'https://127.0.0.1:1', '0.0.0.0:8080', '127.0.0.1:1@example.org:1', '', None, '127.0.0.1', '127.0.0.1:0', '127.0.0.1:70000'):
+                got = s.server_models(typed)
+                self.assertEqual(got['code'], 'not_here', typed)
+                self.assertIn('on this computer', got['error'])
+                self.assertEqual(s.use_server(typed, 'small-9b')['code'], 'not_here')
+        self.assertEqual(self.switched, [])
+
+    def test_an_unavailable_server_is_named_in_the_error(self):
+        with socket.socket() as k:    # a port that was free a moment ago: nothing listens there
+            k.bind(('127.0.0.1', 0))
+            port = k.getsockname()[1]
+        got = self.chooser().server_models(f'127.0.0.1:{port}')
+        self.assertEqual(got['code'], 'no_answer')
+        self.assertIn(f'127.0.0.1:{port}', got['error'])
+        self.assertNotIn('http', got['error'])
+
+    def test_servers_that_do_not_list_models(self):
+        for answer, code in (((401, b'{"error":"Invalid API Key"}'), 'needs_key'), ((403, b''), 'needs_key'), ((500, b'x'), 'no_list'),
+                             ((200, b'not json'), 'no_list'), ((200, b'{"data":"x"}'), 'no_list'), ((200, b'[1,2]'), 'no_list'),
+                             ((200, b'{"data":[]}'), 'no_models'), ((200, b'{"data":[{"name":"no id"}]}'), 'no_models')):
+            ModelServerFake.ANSWER = answer
+            got = self.chooser().server_models(self.where)
+            self.assertEqual(got['code'], code, answer)
+            self.assertIn(self.where, got['error'])
+
+    def test_choosing_saves_and_switches(self):
+        self.settings.mkdir(parents=True, exist_ok=True)
+        (self.settings / 'setup.json').write_text('{"old": ["/path/to/old"]}', encoding='utf-8')
+        s = self.chooser()
+        self.assertEqual(s.use_server(self.where, 'small-9b'), {'model_server': {'address': self.where, 'model': 'small-9b'}})
+        saved = json.loads((self.settings / 'setup.json').read_text(encoding='utf-8'))
+        self.assertEqual(saved, {'old': ['/path/to/old'], 'model_server': {'base': 'http://' + self.where, 'model': 'small-9b'}})
+        self.assertEqual(self.switched, [('http://' + self.where, 'small-9b')])
+        self.assertEqual(api.saved_model_server(self.settings), ('http://' + self.where, 'small-9b'))
+        self.assertEqual(self.chooser('first-run').state()['model_server'], {'address': self.where, 'model': 'small-9b'})
+
+        self.assertEqual(s.stop_server(), {'model_server': None})
+        self.assertEqual(json.loads((self.settings / 'setup.json').read_text(encoding='utf-8')), {'old': ['/path/to/old']})
+        self.assertEqual(self.switched[-1], (None, None))
+        self.assertIsNone(api.saved_model_server(self.settings))
+
+    def test_a_model_the_server_does_not_list_is_not_saved(self):
+        s = self.chooser()
+        for model in ('gone', '', None, ['small-9b']):
+            got = s.use_server(self.where, model)
+            self.assertEqual(got['code'], 'not_listed', model)
+        self.assertIsNone(api.saved_model_server(self.settings))
+        self.assertEqual(self.switched, [])
+
+    def test_a_changed_setup_json_cannot_point_off_this_computer(self):
+        self.settings.mkdir(parents=True, exist_ok=True)
+        for saved in ({'base': 'http://10.0.0.5:8080', 'model': 'm'}, {'base': 'http://example.org:80', 'model': 'm'}, {'base': 'http://127.0.0.1:1'},
+                      {'base': 'http://127.0.0.1:1', 'model': 7}, {'base': 'http://127.0.0.1:1', 'model': 'x' * 201}, 'http://127.0.0.1:1', None):
+            (self.settings / 'setup.json').write_text(json.dumps({'model_server': saved}), encoding='utf-8')
+            self.assertIsNone(api.saved_model_server(self.settings), saved)
+            self.assertIsNone(self.chooser().model_server(), saved)
+
+    def test_the_open_library_follows_the_saved_choice(self):
+        self.chooser().use_server(self.where, 'small-9b')
+        for env, want in (({}, [('http://' + self.where, 'small-9b')]), ({'SURVIVAL_MODEL_BASE': 'http://127.0.0.1:9'}, [])):
+            used = []
+            with mock.patch.object(api, 'SETUP', self.setup('manage', current=self.tmp)), mock.patch.dict(os.environ, env):
+                if not env:
+                    os.environ.pop('SURVIVAL_MODEL_BASE', None)    # test_bridge sets it for the whole run; patch.dict puts it back
+                api.follow_model_server(lambda b, m: used.append((b, m)))
+                self.assertEqual(used, want, env)
+                api.SETUP.use_server(self.where, 'other')     # a choice made now counts, whatever Lastbook was started with
+                self.assertEqual(used[-1], ('http://' + self.where, 'other'))
+                api.SETUP.use_server(self.where, 'small-9b')
+
+    def test_two_windows_the_last_completed_choice_wins_both_places(self):
+        """One window chooses a model while the other stops using it: the saved choice and the running Chat end the same,
+        as the action that finished last left them."""
+        base = 'http://' + self.where
+        for slow in ('switch', 'list'):    # the choosing window is held after saving, or while it asks the server for its models
+            with self.subTest(slow=slow):
+                self.switched, finished, held, let_go = [], [], threading.Event(), threading.Event()
+                s = self.chooser()
+                switch, listing = s.on_model_server, api.model_server.list_models
+
+                def slow_switch(b, m):
+                    if b and slow == 'switch':
+                        held.set()
+                        let_go.wait(1)    # the stop waits here once the two are kept in order; otherwise it slips in
+                    switch(b, m)
+
+                def slow_list(text):
+                    if slow == 'list':
+                        held.set()
+                        let_go.wait(5)
+                    return listing(text)
+
+                s.on_model_server = slow_switch
+                with mock.patch.object(api.model_server, 'list_models', side_effect=slow_list):
+                    choose = threading.Thread(target=lambda: (s.use_server(self.where, 'small-9b'), finished.append('use')))
+                    choose.start()
+                    self.assertTrue(held.wait(5))
+                    stop = threading.Thread(target=lambda: (s.stop_server(), finished.append('stop')))
+                    stop.start()
+                    stop.join(0.3)
+                    let_go.set()
+                    choose.join(10)
+                    stop.join(10)
+
+                want = (base, 'small-9b') if finished[-1] == 'use' else None
+                self.assertEqual(api.saved_model_server(self.settings), want, finished)
+                self.assertEqual(self.switched[-1], want or (None, None), finished)
+
+    def test_routes(self):
+        self.assertIn(('POST', 'server-models'), api.ROUTES)
+        s = self.chooser()
+        self.assertEqual(api.ROUTES[('POST', 'server-models')](s, {'address': self.where})['models'], ['small-9b', 'other'])
+        self.assertEqual(api.ROUTES[('POST', 'use-server')](s, {'address': self.where, 'model': 'other'})['model_server']['model'], 'other')
+        self.assertEqual(api.ROUTES[('POST', 'stop-server')](s, {}), {'model_server': None})
 
 if __name__ == '__main__':
     if len(sys.argv) > 2 and sys.argv[1] == '--child':

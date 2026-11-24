@@ -21,9 +21,12 @@ const Chat = (() => {
   const STATES = { starting: 'Starting the local AI…', thinking: 'Thinking…', searching: 'Searching the library…', reading: 'Reading the pages it found…', writing: 'Writing the answer…' };
   // Where an answer is: search, then read, then write (none yet while the local AI starts). A later round can search again, so a step can light up a second time.
   const STAGES = ['Search', 'Read', 'Write'], STAGE_AT = { starting: -1, thinking: 0, searching: 0, reading: 1, writing: 2 };
+  // The stage the answer is at, and how far the local AI has loaded (null: no figure, so the bar sweeps).
+  const stage = m => ({ at: STAGE_AT[m.state] ?? 0, pct: m.state === 'starting' && m.pct != null ? Math.max(0, Math.min(100, +m.pct || 0)) : null });
+  const stageClass = (i, at) => i < at ? 'done' : i === at ? 'now' : '';
   function progress(m) {
-    const at = STAGE_AT[m.state] ?? 0, pct = m.state === 'starting' && m.pct != null ? Math.max(0, Math.min(100, +m.pct || 0)) : null;
-    const stages = STAGES.map((t, i) => `<li class="${i < at ? 'done' : i === at ? 'now' : ''}">${t}</li>`).join('');
+    const { at, pct } = stage(m);
+    const stages = STAGES.map((t, i) => `<li class="${stageClass(i, at)}">${t}</li>`).join('');
     return `<ol class="wk-stages" aria-hidden="true">${stages}</ol><span class="wk-bar${pct === null ? ' run' : ''}" aria-hidden="true"><span${pct === null ? '' : ` style="width:${pct}%"`}></span></span>`;
   }
   let chats = load(), live = {};   // live[chatId] = {abort, state, steps}
@@ -135,8 +138,9 @@ const Chat = (() => {
       const [ok, line] = localLine(l);
       el.innerHTML = `<span class="${ok ? 'dotok' : 'dotoff'}"></span><span>${esc(line)}${ok ? still : '<span class="long"> — search and reading still work</span>'}</span>`;
     } else {
-      el.innerHTML = s.online ? `<span class="dotok"></span>Local assistant ready${still}`
-        : `<span class="dotoff"></span><span>Assistant offline<span class="long"> — search and browsing still work</span></span>`;
+      const srv = s.server;   // a model server the person chose in Settings (#78)
+      el.innerHTML = s.online ? `<span class="dotok"></span>${srv ? esc(srv.model) + ' ready' : 'Local assistant ready'}${still}`
+        : `<span class="dotoff"></span><span>${srv ? `The model server at ${esc(srv.address)} is not answering` : 'Assistant offline'}<span class="long"> — search and browsing still work</span></span>`;
     }
     const sb = $('#sendBtn'); if (sb) sb.title = s.online ? 'Send' : 'The assistant is offline; you will get matching pages instead';
     setupCard(s);
@@ -242,8 +246,99 @@ const Chat = (() => {
   addEventListener('resize', () => { if ($('.chat-empty')) fitEmpty() });
   function updateBot(i) {
     const el = $('#m' + i); if (!el || !cur) return renderLog();
-    el.innerHTML = botHtml(cur.messages[i], i); wire(el);
+    const m = cur.messages[i], l = live[cur.id], running = l && l.running && i === cur.messages.length - 1;
+    if (running && !m.error && !m.fallback) { patchStream(el, m); wire(el); return }
+    el.innerHTML = botHtml(m, i); wire(el);
   }
+  /* An answer being written changes many times a second. Rebuilding the whole message each time loaded every page thumbnail
+     again (they blinked), started the spinner and the progress bar over, and dropped any text being selected. While it is
+     written, only the parts that changed are touched. Finished answer paragraphs keep their nodes, so a selection in an
+     earlier paragraph stays put while the last, still-growing block is updated. When the answer is done, the message is
+     drawn once in full, as before. */
+  const kid = (parent, cls) => [...parent.children].find(n => n.classList.contains(cls));
+  // patch-answer:start
+  // Put new HTML into el without replacing earlier block nodes whose markup has not changed, so a selection in a
+  // finished paragraph stays put while the trailing, still-growing block is updated.
+  const PATCH_DESCEND = new Set(['UL', 'OL', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'DIV', 'BLOCKQUOTE']);
+  function sameNode(a, b) {
+    if (a.nodeType !== b.nodeType) return false;
+    if (a.nodeType === 3) return a.nodeValue === b.nodeValue;
+    if (a.nodeType !== 1) return false;
+    return a.tagName === b.tagName && a.outerHTML === b.outerHTML;
+  }
+  function syncAttrs(a, b) {
+    for (const at of [...b.attributes]) if (a.getAttribute(at.name) !== at.value) a.setAttribute(at.name, at.value);
+    for (const at of [...a.attributes]) if (!b.hasAttribute(at.name)) a.removeAttribute(at.name);
+  }
+  function syncChildren(dst, src) {
+    const want = [...src.childNodes];
+    let i = 0;
+    while (i < want.length) {
+      const b = want[i], a = dst.childNodes[i];
+      if (a && sameNode(a, b)) { i++; continue }
+      if (a && b && a.nodeType === 1 && b.nodeType === 1 && a.tagName === b.tagName && PATCH_DESCEND.has(a.tagName)) {
+        syncAttrs(a, b);
+        syncChildren(a, b);
+        i++;
+        continue;
+      }
+      break;
+    }
+    while (dst.childNodes.length > i) dst.removeChild(dst.lastChild);
+    for (; i < want.length; i++) dst.appendChild(want[i]);
+  }
+  function patchAnswer(el, html) {
+    if (!html) { while (el.firstChild) el.removeChild(el.firstChild); el.lbHtml = ''; return }
+    if (el.lbHtml === html) return;
+    const tmp = el.ownerDocument.createElement('div');
+    tmp.innerHTML = html;
+    syncChildren(el, tmp);
+    el.lbHtml = html;
+  }
+  // patch-answer:end
+  // One part of the message: made when it first has something to show, removed when it has nothing (a reset clears the
+  // draft), and its HTML set only when that HTML changed. The answer uses patchAnswer so finished paragraphs stay put.
+  function region(parent, tag, cls, inner, place) {
+    let n = kid(parent, cls);
+    if (!inner) { if (n) n.remove(); return }
+    if (!n) { n = parent.ownerDocument.createElement(tag); n.className = cls; place(n) }
+    if (n.lbHtml !== inner) { n.innerHTML = inner; n.lbHtml = inner }
+  }
+  function patchStream(el, m) {
+    const doc = el.ownerDocument, { at, pct } = stage(m);
+    let work = kid(el, 'working');
+    if (!work) {   // the same parts progress() writes, made here when the message has none yet
+      work = doc.createElement('div'); work.className = 'working';
+      const ol = doc.createElement('ol'); ol.className = 'wk-stages'; ol.setAttribute('aria-hidden', 'true');
+      for (const t of STAGES) { const li = doc.createElement('li'); li.textContent = t; ol.append(li) }
+      const bar = doc.createElement('span'); bar.className = 'wk-bar'; bar.setAttribute('aria-hidden', 'true'); bar.append(doc.createElement('span'));
+      work.append(doc.createElement('b'), ol, bar);
+      el.prepend(work);
+    }
+    const label = esc(STATES[m.state] || 'Working…') + (m.state === 'starting' && m.pct != null ? ` ${m.pct}%` : ''), b = work.children[0];
+    if (b.lbHtml !== label) { b.innerHTML = label; b.lbHtml = label }
+    // The stage list and the bar keep their elements, so the spinner and the bar's sweep carry on.
+    [...kid(work, 'wk-stages').children].forEach((li, k) => { const c = stageClass(k, at); if (li.className !== c) li.className = c });
+    const bar = kid(work, 'wk-bar'), fill = bar.children[0], width = pct === null ? '' : pct + '%';
+    bar.classList.toggle('run', pct === null);
+    if (fill.style.width !== width) fill.style.width = width;
+    region(work, 'ul', 'steps', (m.steps || []).map(s => `<li>${stepText(s)}</li>`).join(''), n => work.append(n));
+    const html = m.content ? md(m.content, m) : '';
+    let ans = kid(el, 'answer');
+    if (!html) { if (ans) ans.remove() }
+    else {
+      if (!ans) { ans = doc.createElement('div'); ans.className = 'answer'; work.after(ans) }
+      patchAnswer(ans, html);
+    }
+
+    const found = m.sources || [];
+    region(el, 'div', 'prefound', found.length ? `<p class="small muted">Pages found so far — you can open them while the answer is written:</p>${srcCards(found.slice(0, 6), true)}` : '', n => el.append(n));
+  }
+  // sources-finish:start (app/tests/test_chat_steps.py)
+  // After a normal `done` event, `cited` is the final list. If the user stops mid-stream,
+  // `cited` is empty, so keep the sources already received.
+  const sourcesForFinish = m => m.cited || (m.stopped ? (m.sources || []) : []) || [];
+  // sources-finish:end
   function botHtml(m, i) {
     const l = live[cur.id], running = l && l.running && i === cur.messages.length - 1;
     const steps = (m.steps || []).map(s => `<li>${stepText(s)}</li>`).join('');
@@ -255,7 +350,7 @@ const Chat = (() => {
     if (running && found.length) h += `<div class="prefound"><p class="small muted">Pages found so far — you can open them while the answer is written:</p>${srcCards(found.slice(0, 6), true)}</div>`;
     if (m.fallback) h += srcCards(m.fallback, true);
     if (!running && m.content) {
-      const cited = m.cited || [];
+      const cited = sourcesForFinish(m);
       if ((m.invalid || []).length) h += `<p class="small" style="color:var(--stop)">The model referred to sources that don’t exist (${m.invalid.join(', ')}); those markers were removed.</p>`;
       h += `<div class="legend small"><span><span class="lg-c">1</span> linked to a page or video</span><span><span class="lg-u">dotted</span> the model’s own wording, not linked to a source</span></div>`;
       if (cited.length) h += `<h3 class="srch">Sources (${cited.length})</h3>${srcCards(cited, false)}`;
@@ -434,7 +529,7 @@ const Chat = (() => {
     const redraw = throttle(() => { if (cur === c) { updateBot(idx); scrollEnd() } }, 80);
     try {
       const st = await getStatus();
-      if (!st.online) throw Object.assign(new Error('offline'), { offline: true, why: st.local && localLine(st.local)[1] });
+      if (!st.online) throw Object.assign(new Error('offline'), { offline: true, why: st.local ? localLine(st.local)[1] : st.server && `The model server at ${st.server.address} is not answering. Check that it is running.` });
       const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: history_(c).slice(0, -1).concat([{ role: 'user', content: text }]), about: c.about }), signal: ctl.signal });
       if (!r.ok || !r.body) throw new Error('The server refused the question (' + r.status + ').');
       const rd = r.body.getReader(), dec = new TextDecoder();
@@ -459,7 +554,12 @@ const Chat = (() => {
       else m.error = e.message || 'Something went wrong.';
     }
     m.running = false; delete m.state;
-    if (m.stopped && m.content) m.content += '\n\n(Stopped.)';
+    if (m.stopped && m.content) {
+      m.content += '\n\n(Stopped.)';
+      // The `done` event never arrives, so `cited` would be empty and the finished view
+      // would say the answer is unverified. Keep the sources already received.
+      if (m.cited == null && (m.sources || []).length) m.cited = m.sources;
+    }
     live[c.id].running = false;
     c.updated = Date.now(); persist();
     if (cur === c) { updateBot(idx); setBusy(false); scrollEnd(); const t = $('#chatIn'); if (t && matchMedia('(hover:hover)').matches) t.focus({ preventScroll: true }) }

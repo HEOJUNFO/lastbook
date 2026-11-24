@@ -60,7 +60,9 @@ The seven continental boxes and Madeira's come from the GISCO polygon bounds. Th
 polygon, because GISCO has no sub-regional NUTS for the islands, so they come from the INE address dataset's own two
 groups of address points (marked in the table). The inputs are the GeoJSON above for the polygon boxes and the counted
 address rows described in "Addresses measured" for the island boxes, so every number here is recomputable from those
-two datasets with the rule stated.
+two datasets with the rule stated. Madeira's row was since re-measured from the official CAOP 2025 polygon — see the
+22 November entry in "What was checked, and what was not"; the seven continental rows keep GISCO until each is
+verified the same way, because the CAOP download ships one region's boundaries per file.
 
 As a check, the outer edges match Portugal's known extreme points: Cabo da Roca in the west (-9.50°), the eastern border
 with Spain (-6.21°), Melgaço and Castro Laboreiro in the north (42.15°), and Cabo de Santa Maria near Faro in the south
@@ -77,13 +79,14 @@ with Spain (-6.21°), Melgaço and Castro Laboreiro in the north (42.15°), and 
 | `pt-15` | PT15 | Algarve | -8.9820, 36.9710, -7.4016, 37.5263 | -9.14, 36.82, -7.25, 37.68 | GISCO polygon |
 | `pt-20w` | PT20 (west) | Açores: Corvo e Flores | -31.2660, 39.3749, -31.1104, 39.6766 | -31.42, 39.22, -30.96, 39.83 | INE address points (group `AC25`) |
 | `pt-20e` | PT20 (east) | Açores: restantes ilhas | -28.8250, 36.9295, -25.0138, 39.0954 | -28.98, 36.77, -24.86, 39.25 | INE address points (group `AC26`) |
-| `pt-30` | PT30 | Região Autónoma da Madeira | -17.2660, 30.0257, -15.8554, 33.1040 | -17.42, 29.87, -15.70, 33.26 | GISCO polygon |
+| `pt-30` | PT30 | Região Autónoma da Madeira | -17.2659, 30.0288, -15.8537, 33.1282 | -17.42, 29.87, -15.70, 33.28 | CAOP 2025 polygon |
 
 Cross-checks between the two datasets:
 
 - The address dataset's mainland group (`PTCONT`) agrees from inside with the continental boxes on every edge.
-- Madeira's address group (`MAD`) sits inside the GISCO polygon box on every edge: its raw points reach
-  -17.2578…-15.8637 and 30.0351…33.0886 against the polygon's -17.2660…-15.8554 and 30.0257…33.1040.
+- Madeira's address group (`MAD`) sits inside the polygon box on every edge: its raw points reach
+  -17.2578…-15.8637 and 30.0351…33.0886 against the official CAOP polygon's -17.2659…-15.8537 and 30.0288…33.1282
+  (and inside the earlier GISCO row of -17.2660…-15.8554 and 30.0257…33.1040 as well).
 - GISCO's own PT20 polygon box is -31.2679, 36.9305, -25.0142, 39.7262: its west edge matches the Corvo-and-Flores
   address points to 0.002°. Its south edge sits at 36.93° N, as does the eastern address group's lowest row — and that
   row **is now located**. It is id `pt.ine.add.AC26.76921`, postcode 9580-228, city SANTO ESPÍRITO: an address in the
@@ -355,7 +358,18 @@ other proposals.
   data); taginfo for Geofabrik's Portugal extract for `trees=olive_trees` (4,975 ways) and `produce=olives` (2);
   Nominatim's reverse geocode of the 36.93° N address row itself (nearest feature: the Farol de Gonçalo Velho node,
   15 m away), and the row's own fields, which settle where that row is — see the cross-checks.
-- **Not checked:** the CAOP download and licence (DGT is a JavaScript application); the INE INSPIRE portal (under
+- **Updated on 22 November 2026 (the Madeira pilot, [MAP-PT-30.md](MAP-PT-30.md)):** the CAOP download and licence,
+  which the "Not checked" list was waiting on. DGT's portal turns out to be reachable without a browser: the page
+  renders server-side and the downloads are direct (`CAOP_RAM_2025-gpkg.zip`, 15 MB, SHA-256 recorded in the pilot's
+  `build.json`). The licence is confirmed from DGT's own open-data page — CC BY 4.0, attribution to the Direção-Geral
+  do Território — and the SNIG register records the CAOP as a high-value dataset under Regulation (EU) 2023/138 with
+  no INSPIRE use constraints. Madeira's box was re-measured from the official polygon (EPSG:5016, converted vertex by
+  vertex): the north edge moves 0.024° north — Porto Santo's tip, which the GISCO 1:3M generalisation does not carry —
+  and west, south and east agree with GISCO by at most 0.0031°. All 130,271 address rows sit inside the official box, and
+  the address count reproduces exactly. The pilot's builder, `tools/build_region_pt_30.py`, cuts the Geofabrik
+  country extract to this box and passes it to the repository's own `tools/build_map.py` unchanged.
+- **Not checked:** the INE INSPIRE portal (under
   maintenance on the day); COS 2018 (site did not resolve); APA/SNIAmb hydrography and dam inventories (did not
   respond); the MDT-DGT products and licence; the INE municipality register; the ISO 3166-2:PT codes against the ISO
-  site; the reason for Overture's row count differing from the raw INE CSV.
+  site; the reason for Overture's row count differing from the raw INE CSV. The CAOP download and licence, which this
+  list held, moved to the checked list on 22 November 2026 (see above).

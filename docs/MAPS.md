@@ -153,6 +153,16 @@ as one map.
 
 [REGIONS-BO.md](REGIONS-BO.md) does the same for Bolivia as one country-wide region, with its nine departments as an
 alternative.
+[MAP-BO-L.md](MAP-BO-L.md) describes a first build from the Bolivia proposal: a detailed map of La Paz department,
+cut by its COD-AB box from Geofabrik's Bolivia extract. It depends on the prototype region map builder from the
+still-open pull request #80, at commit `a453274`; that builder is not in the main branch.
+
+[MAP-DE-BE.md](MAP-DE-BE.md) builds one of the German states, Berlin, as an offline map set with an address index
+(`tools/build_region_de_be.py`); searching that index the German way is runtime work in #79.
+
+[REGIONS-PT.md](REGIONS-PT.md) does the same for Portugal's ten regions, with the INE address data measured.
+[MAP-PT-30.md](MAP-PT-30.md) builds the first one: Madeira (PT-30), from the official CAOP box, INE addresses and
+OpenStreetMap.
 
 ### To do: maps for every place on Earth
 
